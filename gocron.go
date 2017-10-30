@@ -67,10 +67,12 @@ type Job struct {
 
 	//diff time zone for each timer
 	timeZone *time.Location
+
+	scheduler *Scheduler
 }
 
 // Create a new job with the time interval.
-func NewJob(intervel uint64) *Job {
+func (s *Scheduler) newJob(intervel uint64) *Job {
 	return &Job{
 		intervel,
 		"", "", "",
@@ -79,13 +81,14 @@ func NewJob(intervel uint64) *Job {
 		time.Sunday,
 		make(map[string]interface{}),
 		make(map[string]([]interface{})),
-		time.UTC,
+		loc,
+		s,
 	}
 }
 
 // True if the job should be run now
 func (j *Job) shouldRun() bool {
-	return time.Now().After(j.nextRun)
+	return j.scheduler.Clock.Now().After(j.nextRun)
 }
 
 //Run the job and immdiately reschedulei it
@@ -101,7 +104,7 @@ func (j *Job) run() (result []reflect.Value, err error) {
 		in[k] = reflect.ValueOf(param)
 	}
 	result = f.Call(in)
-	j.lastRun = time.Now().In(j.timeZone)
+	j.lastRun = j.scheduler.Clock.Now().In(j.timeZone)
 	j.scheduleNextRun()
 	return
 }
@@ -132,28 +135,27 @@ func (j *Job) Do(jobFun interface{}, params ...interface{}) {
 func (j *Job) At(t string) *Job {
 	hour := int((t[0]-'0')*10 + (t[1] - '0'))
 	min := int((t[3]-'0')*10 + (t[4] - '0'))
-	sec := int((t[6]-'0')*10 + (t[7] - '0'))
-	if hour < 0 || hour > 23 || min < 0 || min > 59 || sec < 0 || sec > 59 {
+	if hour < 0 || hour > 23 || min < 0 || min > 59 {
 		panic("time format error.")
 	}
 	// time.Date(2009, time.November, 10, 23, 0, 0, 0, time.UTC)
-	mock := time.Date(time.Now().In(j.timeZone).Year(), time.Now().In(j.timeZone).Month(), time.Now().In(j.timeZone).Day(), int(hour), int(min), int(sec), 0, j.timeZone)
+	mock := time.Date(j.scheduler.Clock.Now().In(j.timeZone).Year(), j.scheduler.Clock.Now().In(j.timeZone).Month(), j.scheduler.Clock.Now().In(j.timeZone).Day(), int(hour), int(min), 0, 0, j.timeZone)
 
 	if j.unit == "days" {
-		if time.Now().After(mock) {
+		if j.scheduler.Clock.Now().After(mock) {
 			j.lastRun = mock
 		} else {
-			j.lastRun = time.Date(time.Now().In(j.timeZone).AddDate(0, 0, -1).Year(), time.Now().In(j.timeZone).AddDate(0, 0, -1).Month(), time.Now().In(j.timeZone).AddDate(0, 0, -1).Day(), hour, min, sec, 0, j.timeZone)
+			j.lastRun = time.Date(j.scheduler.Clock.Now().In(j.timeZone).AddDate(0, 0, -1).Year(), j.scheduler.Clock.Now().In(j.timeZone).AddDate(0, 0, -1).Month(), j.scheduler.Clock.Now().In(j.timeZone).AddDate(0, 0, -1).Day(), hour, min, 0, 0, j.timeZone)
 		}
 	} else if j.unit == "weeks" {
-		if time.Now().After(mock) {
+		if j.scheduler.Clock.Now().After(mock) {
 			i := mock.Weekday() - j.startDay
 			if i < 0 {
 				i = 7 + i
 			}
-			j.lastRun = time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day()-int(i), hour, min, sec, 0, j.timeZone)
+			j.lastRun = time.Date(j.scheduler.Clock.Now().Year(), j.scheduler.Clock.Now().Month(), j.scheduler.Clock.Now().Day()-int(i), hour, min, 0, 0, j.timeZone)
 		} else {
-			j.lastRun = time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day()-7, hour, min, sec, 0, j.timeZone)
+			j.lastRun = time.Date(j.scheduler.Clock.Now().Year(), j.scheduler.Clock.Now().Month(), j.scheduler.Clock.Now().Day()-7, hour, min, 0, 0, j.timeZone)
 		}
 	}
 	return j
@@ -163,14 +165,14 @@ func (j *Job) At(t string) *Job {
 func (j *Job) scheduleNextRun() {
 	if j.lastRun == time.Unix(0, 0) {
 		if j.unit == "weeks" {
-			i := time.Now().Weekday() - j.startDay
+			i := j.scheduler.Clock.Now().Weekday() - j.startDay
 			if i < 0 {
 				i = 7 + i
 			}
-			j.lastRun = time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day()-int(i), 0, 0, 0, 0, j.timeZone)
+			j.lastRun = time.Date(j.scheduler.Clock.Now().Year(), j.scheduler.Clock.Now().Month(), j.scheduler.Clock.Now().Day()-int(i), 0, 0, 0, 0, j.timeZone)
 
 		} else {
-			j.lastRun = time.Now()
+			j.lastRun = j.scheduler.Clock.Now()
 		}
 	}
 
@@ -181,20 +183,19 @@ func (j *Job) scheduleNextRun() {
 		switch j.unit {
 		case "minutes":
 			j.period = time.Duration(j.interval * 60)
+			j.nextRun = j.lastRun.Add(j.period * time.Second)
 			break
 		case "hours":
 			j.period = time.Duration(j.interval * 60 * 60)
+			j.nextRun = j.lastRun.Add(j.period * time.Second)
 			break
 		case "days":
-			j.period = time.Duration(j.interval * 60 * 60 * 24)
+			j.nextRun = j.lastRun.AddDate(0, 0, int(j.interval))
 			break
 		case "weeks":
-			j.period = time.Duration(j.interval * 60 * 60 * 24 * 7)
+			j.nextRun = j.lastRun.AddDate(0, 0, int(j.interval*7))
 			break
-		case "seconds":
-			j.period = time.Duration(j.interval)
 		}
-		j.nextRun = j.lastRun.Add(j.period * time.Second)
 	}
 }
 
@@ -366,6 +367,8 @@ type Scheduler struct {
 
 	// Size of jobs which jobs holding.
 	size int
+
+	Clock Clock
 }
 
 // Scheduler implements the sort.Interface{} for sorting jobs, by the time nextRun
@@ -384,7 +387,7 @@ func (s *Scheduler) Less(i, j int) bool {
 
 // Create a new scheduler
 func NewScheduler() *Scheduler {
-	return &Scheduler{[MAXJOBNUM]*Job{}, 0}
+	return &Scheduler{jobs: [MAXJOBNUM]*Job{}, size: 0, Clock: RealClock{}}
 }
 
 // Get the current runnable jobs, which shouldRun is True
@@ -408,7 +411,7 @@ func (s *Scheduler) getRunnableJobs() (running_jobs [MAXJOBNUM]*Job, n int) {
 // Datetime when the next job should run.
 func (s *Scheduler) NextRun() (*Job, time.Time) {
 	if s.size <= 0 {
-		return nil, time.Now()
+		return nil, s.Clock.Now()
 	}
 	sort.Sort(s)
 	return s.jobs[0], s.jobs[0].nextRun
@@ -416,7 +419,7 @@ func (s *Scheduler) NextRun() (*Job, time.Time) {
 
 // Schedule a new periodic job
 func (s *Scheduler) Every(interval uint64) *Job {
-	job := NewJob(interval)
+	job := s.newJob(interval)
 	s.jobs[s.size] = job
 	s.size++
 	return job
@@ -547,3 +550,17 @@ func Remove(j interface{}) {
 func NextRun() (job *Job, time time.Time) {
 	return defaultScheduler.NextRun()
 }
+
+type Clock interface {
+	Now() time.Time
+}
+
+type RealClock struct{}
+
+func (RealClock) Now() time.Time { return time.Now() }
+
+type MockClock struct {
+	now time.Time
+}
+
+func (m MockClock) Now() time.Time { return m.now }
